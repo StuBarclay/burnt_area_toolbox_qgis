@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#1f2a37"/>
+  <!-- burnt ground: charred slope -->
+  <path d="M6 50 C 18 44, 30 52, 40 47 C 48 43, 56 47, 58 50 L58 58 L6 58 Z" fill="#3f2a1d"/>
+  <path d="M6 50 C 18 44, 30 52, 40 47 C 48 43, 56 47, 58 50" fill="none" stroke="#d95f0e" stroke-width="2" stroke-linejoin="round"/>
+  <!-- charred tree stumps -->
+  <rect x="16" y="40" width="3" height="12" rx="1" fill="#20160f"/>
+  <rect x="24" y="43" width="3" height="10" rx="1" fill="#20160f"/>
+  <!-- flame -->
+  <path d="M40 40 C 47 33, 45 25, 40 20 C 45 25, 37 27, 40 34 C 36 30, 36 24, 39 20
+           C 32 25, 31 34, 36 40 C 33 39, 32 35, 33 31 C 29 36, 30 44, 39 45
+           C 46 46, 48 40, 45 35 C 45 39, 43 39, 40 40 Z" fill="#f97316"/>
+  <path d="M39 41 C 43 37, 42 32, 39 28 C 40 33, 36 34, 38 38 C 35 36, 36 32, 36 30
+           C 32 34, 33 41, 39 43 Z" fill="#fbbf24"/>
+</svg>
