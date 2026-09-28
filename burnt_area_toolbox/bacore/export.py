@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -88,6 +89,52 @@ def write_result_rasters(
         ),
     ]
     return paths
+
+
+def write_key_rasters(
+    config: BurntAreaConfig,
+    result: AnalysisResult,
+    outdir: Path,
+) -> tuple[Path, Path, Path]:
+    """Write only the three exportable rasters and return their paths.
+
+    Writes the dNBR, seven-class severity and burnt-mask GeoTIFFs -- the only
+    rasters an algorithm can surface as named Processing outputs -- and skips
+    the baseline / post-fire NBR, the summary CSV, the polygons and the
+    manifest. Used when the user did not ask to keep the full result set (no
+    output folder), so a quick run does not spend I/O writing files that would
+    only be thrown away.
+
+    Args:
+        config: The run configuration (its ``area_name`` prefixes filenames).
+        result: The analysis result to write.
+        outdir: The output directory (created if needed).
+
+    Returns:
+        ``(dnbr, severity, burnt_mask)`` paths, matching the names
+        :func:`write_result_rasters` would give those three rasters.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    slug = _slugify(config.area_name)
+    grid = result.grid
+    dnbr = write_raster(
+        outdir / f"{slug}_delta_nbr.tif", result.delta_nbr, grid, dtype="float32", nodata=_NAN
+    )
+    severity = write_raster(
+        outdir / f"{slug}_dnbr_severity.tif",
+        result.severity_class,
+        grid,
+        dtype="uint8",
+        nodata=0,
+    )
+    burnt_mask = write_raster(
+        outdir / f"{slug}_burnt_mask.tif",
+        float_to_coded(result.burnt_mask, fill=0),
+        grid,
+        dtype="uint8",
+        nodata=None,
+    )
+    return dnbr, severity, burnt_mask
 
 
 def _summary_row(config: BurntAreaConfig, result: AnalysisResult) -> dict[str, object]:
@@ -178,10 +225,31 @@ def write_vectors(config: BurntAreaConfig, result: AnalysisResult, outdir: Path)
     return written
 
 
-def write_manifest(config: BurntAreaConfig, result: AnalysisResult, outdir: Path) -> Path:
-    """Write ``run_manifest.json`` capturing config, ranges and provenance."""
+def write_manifest(
+    config: BurntAreaConfig,
+    result: AnalysisResult,
+    outdir: Path,
+    written: Iterable[Path] | None = None,
+) -> Path:
+    """Write ``run_manifest.json`` capturing config, ranges and provenance.
+
+    Args:
+        config: The run configuration.
+        result: The analysis result.
+        outdir: The output directory.
+        written: The files produced by *this* run, to record under
+            ``"outputs"``. When ``None`` (legacy callers) the directory is
+            globbed instead -- which, in a non-empty user folder, would also
+            list unrelated pre-existing files as if they were run outputs, so
+            callers should pass the explicit list.
+    """
     outdir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(str(path.relative_to(outdir)) for path in outdir.rglob("*") if path.is_file())
+    if written is None:
+        listed = sorted(
+            str(path.relative_to(outdir)) for path in outdir.rglob("*") if path.is_file()
+        )
+    else:
+        listed = sorted(_relative_output_name(path, outdir) for path in written)
     manifest: dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "project_name": config.project_name,
@@ -197,11 +265,19 @@ def write_manifest(config: BurntAreaConfig, result: AnalysisResult, outdir: Path
         "selected_postfire_scene_date": result.postfire_observation_date,
         "selected_postfire_valid_fraction": result.postfire_valid_fraction,
         "severity_area_km2": result.severity_area_km2,
-        "outputs": sorted([*existing, "run_manifest.json"]),
+        "outputs": sorted([*listed, "run_manifest.json"]),
     }
     path = outdir / "run_manifest.json"
     path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return path
+
+
+def _relative_output_name(path: Path, outdir: Path) -> str:
+    """Return ``path`` relative to ``outdir`` (or its bare name if unrelated)."""
+    try:
+        return str(path.relative_to(outdir))
+    except ValueError:
+        return path.name
 
 
 def export_outputs(
@@ -222,5 +298,7 @@ def export_outputs(
     written.extend(write_result_rasters(config, result, out))
     written.append(write_summary_csv(config, result, out))
     written.extend(write_vectors(config, result, out))
-    written.append(write_manifest(config, result, out))
+    # Record only the files this run produced (not any pre-existing directory
+    # contents), then append the manifest itself.
+    written.append(write_manifest(config, result, out, written=list(written)))
     return written

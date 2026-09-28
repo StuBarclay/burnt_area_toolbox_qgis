@@ -47,14 +47,23 @@ class _CRSProxy:
 class _VectorLayer:
     """A read-only OGR layer wrapper mirroring the used ``fiona`` layer API."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, layer: int | str = 0) -> None:
         self._ds = ogr.Open(path, 0)
         if self._ds is None:
             raise RasterioError(f"Could not open vector file: {path}")
-        layer = self._ds.GetLayer(0)
-        if layer is None:  # pragma: no cover - defensive
-            raise RasterioError(f"Vector file has no layers: {path}")
-        self._layer = layer
+        # ``layer`` selects which layer of a multi-layer source (e.g. a
+        # GeoPackage) to read: an integer index or a layer name. It defaults to
+        # the first layer, matching fiona's default and the single-layer files
+        # the core writes; a caller reading a specific layer of a multi-layer
+        # container can name it explicitly.
+        selected = self._ds.GetLayerByName(layer) if isinstance(layer, str) else self._ds.GetLayer(
+            layer
+        )
+        if selected is None:
+            if isinstance(layer, str):
+                raise RasterioError(f"Vector file {path!r} has no layer named {layer!r}")
+            raise RasterioError(f"Vector file has no layer at index {layer}: {path}")
+        self._layer = selected
 
     @property
     def bounds(self) -> tuple[float, float, float, float] | None:
@@ -97,6 +106,14 @@ class _VectorLayer:
         self.close()
 
 
-def open(path: str | os.PathLike[str]) -> _VectorLayer:  # noqa: A001 - mirror ``fiona.open``
-    """Open a vector file for reading, mirroring :func:`fiona.open`."""
-    return _VectorLayer(os.fspath(path))
+def open(  # noqa: A001 - mirror ``fiona.open``
+    path: str | os.PathLike[str], layer: int | str = 0
+) -> _VectorLayer:
+    """Open a vector file for reading, mirroring :func:`fiona.open`.
+
+    Args:
+        path: The vector file to open.
+        layer: The layer index or name to read from a multi-layer source;
+            defaults to the first layer.
+    """
+    return _VectorLayer(os.fspath(path), layer)

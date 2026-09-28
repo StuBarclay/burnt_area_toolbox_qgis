@@ -182,6 +182,67 @@ def sieve(
     return out
 
 
+def _sieve_via_gdal(
+    data: NDArray[np.integer],
+    size: int,
+    connectivity: int,
+) -> NDArray[np.integer] | None:
+    """Sieve ``data`` with GDAL's C-optimised ``SieveFilter``, or ``None``.
+
+    ``rasterio.features.sieve`` is a thin wrapper over ``GDALSieveFilter``, so
+    this produces the same result as the pure-Python :func:`sieve` but without
+    materialising one Python tuple per pixel -- removing the memory/time cliff
+    on large arrays. Returns ``None`` when GDAL is unavailable (the GDAL-free
+    sandbox) or the call fails, so the caller can fall back to :func:`sieve`.
+    """
+    try:
+        from osgeo import gdal
+    except Exception:  # pragma: no cover - GDAL absent (sandbox/CI without osgeo)
+        return None
+
+    arr = np.ascontiguousarray(np.asarray(data)).astype(np.int32)
+    rows, cols = arr.shape
+    try:
+        driver = gdal.GetDriverByName("MEM")
+        src_ds = driver.Create("", cols, rows, 1, gdal.GDT_Int32)
+        dst_ds = driver.Create("", cols, rows, 1, gdal.GDT_Int32)
+        try:
+            src_band = src_ds.GetRasterBand(1)
+            dst_band = dst_ds.GetRasterBand(1)
+            src_band.WriteArray(arr)
+            # threshold=size: regions smaller than ``size`` pixels are removed,
+            # matching rasterio.features.sieve / the pure-Python reference.
+            gdal.SieveFilter(src_band, None, dst_band, int(size), int(connectivity))
+            out = dst_band.ReadAsArray()
+        finally:
+            src_ds = None
+            dst_ds = None
+    except Exception:  # pragma: no cover - defensive; fall back to pure Python
+        return None
+    if out is None:  # pragma: no cover - defensive
+        return None
+    return np.asarray(out).astype(np.asarray(data).dtype)
+
+
+def _apply_sieve(
+    data: NDArray[np.integer],
+    size: int,
+    connectivity: int,
+) -> NDArray[np.integer]:
+    """Sieve ``data``, preferring GDAL and falling back to pure Python.
+
+    Used by :func:`cleanup_burnt_mask` so production runs (where QGIS always
+    ships GDAL) take the fast C path, while the pure-numpy sandbox still works
+    via the reference :func:`sieve`.
+    """
+    if size <= 1 or np.asarray(data).size == 0:
+        return np.asarray(data).copy()
+    accelerated = _sieve_via_gdal(data, size, connectivity)
+    if accelerated is not None:
+        return accelerated
+    return sieve(data, size=size, connectivity=connectivity)
+
+
 def cleanup_burnt_mask(
     burnt_mask: NDArray[np.floating],
     *,
@@ -215,9 +276,9 @@ def cleanup_burnt_mask(
     cleaned = (cleaned != 0).astype(np.uint8)
 
     if min_patch_pixels > 0:
-        cleaned = sieve(cleaned, size=min_patch_pixels, connectivity=8).astype(np.uint8)
+        cleaned = _apply_sieve(cleaned, size=min_patch_pixels, connectivity=8).astype(np.uint8)
     if fill_holes_pixels > 0:
-        inverted = sieve(
+        inverted = _apply_sieve(
             (1 - cleaned).astype(np.uint8),
             size=fill_holes_pixels,
             connectivity=8,

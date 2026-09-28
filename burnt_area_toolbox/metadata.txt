@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Map burnt area and burn severity from the differenced Normalised Burn Ratio (dNBR) of Sentinel-2 imagery — either from rasters you already have or by fetching cloud-free scenes from a public STAC catalogue.
 about=Computes the differenced Normalised Burn Ratio (dNBR), a seven-class burn-severity raster and a cleaned burnt-area mask over an area of interest. Two algorithms are provided: one differences a pre-fire and a post-fire raster you already have; the other searches a public STAC catalogue (Earth Search / Sentinel-2 L2A by default, no login required) for cloud-free imagery before and after a fire, median-composites a baseline and downloads only the bands it needs. All raster and vector operations use GDAL/OGR and NumPy, which are installed with QGIS, so no extra Python packages are required. A pixel counts as burnt where dNBR exceeds a threshold you set. Not a substitute for field validation of fire extent or severity.
-version=0.1.1
+version=0.2.0
 author=Stuart Barclay
 email=stu_barclay@hotmail.com
 tracker=https://github.com/StuBarclay/burnt_area_toolbox_qgis/issues
@@ -12,10 +12,12 @@ repository=https://github.com/StuBarclay/burnt_area_toolbox_qgis
 homepage=https://github.com/StuBarclay/burnt_area_toolbox_qgis
 category=Analysis
 icon=icon.png
-experimental=False
+license=Apache-2.0
+experimental=True
 deprecated=False
 hasProcessingProvider=yes
 tags=bushfire,burnt area,burn severity,dnbr,nbr,fire,sentinel-2,satellite,raster,remote sensing,stac,australia
 changelog=
+    0.2.0 - Robustness and packaging. Remote Sentinel-2 reads now retry with back-off and time out instead of aborting a whole run on a network blip; speckle removal / hole filling use GDAL's fast SieveFilter; runs without an output folder write only the requested rasters (and clean up after themselves); the run manifest lists only the files that run produced; large-polygon areas are measured more accurately. First release marked experimental while real-QGIS coverage lands.
     0.1.1 - STAC downloads: new optional "Max scenes per window" cap keeps only the clearest (least-cloudy) scenes for the baseline and post-fire searches, to bound download time and bandwidth (0 = no limit). The per-scene progress bar now advances continuously across both loading phases instead of resetting between them.
     0.1.0 - Initial release: burnt area and burn severity from Sentinel-2 dNBR. "From rasters" differences a pre/post-fire raster pair you supply; "From STAC imagery" fetches cloud-free scenes from a public catalogue (Earth Search / Sentinel-2 L2A). Outputs a dNBR raster, a seven-class severity raster and a cleaned burnt mask, styled automatically, plus an optional full result set (all GeoTIFFs, a summary CSV, polygons and a run manifest). Processing provider + friendly dialog. No extra Python packages required.

@@ -1,12 +1,18 @@
 name: CI
 
-# Runs the same four gates the project uses locally: Ruff lint, Ruff format
-# check, mypy (strict) and pytest. QGIS is not available on the hosted
-# runners, so the QGIS-side tests (tests/test_qgis_glue.py) and the GDAL-backed
-# raster tests skip automatically via ``pytest.importorskip`` -- exactly as
-# they do in a plain (non-QGIS) environment. The pure compute core, the GDAL
-# shims' numeric logic, the config builder, the progress/feedback glue, the
-# styling tables and the help metadata are all exercised here.
+# Two jobs:
+#
+# * ``gates`` runs the four gates the project uses locally -- Ruff lint, Ruff
+#   format check, mypy (strict) and pytest -- in a plain Python environment.
+#   QGIS and GDAL are absent there, so the QGIS-side tests
+#   (tests/test_qgis_glue.py) and every GDAL-backed test skip automatically via
+#   ``pytest.importorskip``. The pure compute core, the config builder, the
+#   progress/feedback glue, the styling tables and the help metadata are all
+#   exercised here, across the Python floor (3.10) and current-LTR (3.12).
+# * ``gdal-tests`` runs pytest inside an OSGeo/GDAL container with real
+#   ``rasterio`` + ``affine`` installed, so the GDAL-backed raster/spatial
+#   tests, the GDAL sieve and the rasterio-parity suite
+#   (tests/test_rio_shim_equivalence.py) actually execute instead of skipping.
 
 on:
   push:
@@ -55,3 +61,38 @@ jobs:
 
       - name: pytest
         run: pytest -q
+
+  gdal-tests:
+    # The gates above run in a plain Python environment where the GDAL-backed
+    # tests (the vendored shim, the sieve, the raster/spatial helpers and the
+    # rasterio-parity checks) all skip via ``pytest.importorskip``. This job
+    # runs inside an image that already has GDAL's Python bindings so those
+    # tests actually execute, and additionally installs real rasterio + affine
+    # so tests/test_rio_shim_equivalence.py can compare the shim against them.
+    name: GDAL-backed tests
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/osgeo/gdal:ubuntu-small-3.9.2
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Python tooling
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-pip python3-venv
+          python3 -m pip install --break-system-packages --upgrade pip
+
+      - name: Install test dependencies
+        # GDAL's Python bindings ship in the container; pin the pip GDAL to the
+        # container's library version so pytest imports osgeo from the system
+        # install rather than rebuilding it. rasterio + affine back the parity
+        # tests; numpy/pyyaml/pytest run the suite.
+        run: |
+          python3 -m pip install --break-system-packages \
+            "numpy>=1.24" "pyyaml>=6.0" "pytest>=8.0" \
+            "rasterio>=1.4,<1.5" "affine>=2.4"
+
+      - name: pytest (GDAL paths exercised)
+        run: python3 -m pytest -q

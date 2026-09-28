@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -342,6 +343,7 @@ class DnbrFromStacAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(str(error)) from error
 
         folder = self.parameterAsString(parameters, self.OUTPUT_DIR, context)
+        temp_output_dir: Path | None = None
         if folder:
             output_dir = Path(folder)
         elif export_polygons:
@@ -349,62 +351,72 @@ class DnbrFromStacAlgorithm(QgsProcessingAlgorithm):
                 "Set an output folder to keep the exported polygons, or untick that option."
             )
         else:
+            # No folder to keep: write into a scratch directory we delete once
+            # the requested rasters have been copied to their destinations.
             output_dir = Path(tempfile.mkdtemp(prefix="burntarea_"))
+            temp_output_dir = output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        feedback.pushInfo(
-            f"Baseline {config.baseline_range[0]}..{config.baseline_range[1]}; "
-            f"post-fire {config.postfire_range[0]}..{config.postfire_range[1]}."
-        )
         try:
-            result = pipeline.run_stac(
-                config,
-                message=make_message(feedback),
-                scene_progress=make_scene_progress(feedback),
-                is_cancelled=make_cancel(feedback),
+            feedback.pushInfo(
+                f"Baseline {config.baseline_range[0]}..{config.baseline_range[1]}; "
+                f"post-fire {config.postfire_range[0]}..{config.postfire_range[1]}."
             )
-        except BurntAreaError as error:
-            raise QgsProcessingException(str(error)) from error
-        if result is None or feedback.isCanceled():
-            feedback.pushInfo("Run cancelled.")
-            return {}
+            try:
+                result = pipeline.run_stac(
+                    config,
+                    message=make_message(feedback),
+                    scene_progress=make_scene_progress(feedback),
+                    is_cancelled=make_cancel(feedback),
+                )
+            except BurntAreaError as error:
+                raise QgsProcessingException(str(error)) from error
+            if result is None or feedback.isCanceled():
+                feedback.pushInfo("Run cancelled.")
+                return {}
 
-        feedback.pushInfo(
-            f"Burnt area: {result.burnt_area_km2:.3f} km² of {result.valid_area_km2:.3f} km² valid."
-        )
-        outputs = write_run_outputs(config, result, output_dir)
-        for path in outputs.all_paths:
-            feedback.pushInfo(f"  wrote {path}")
+            feedback.pushInfo(
+                f"Burnt area: {result.burnt_area_km2:.3f} km² of "
+                f"{result.valid_area_km2:.3f} km² valid."
+            )
+            # Only write the full result set when the user set a folder to keep;
+            # otherwise write just the three exportable rasters.
+            outputs = write_run_outputs(config, result, output_dir, full_set=bool(folder))
+            for path in outputs.all_paths:
+                feedback.pushInfo(f"  wrote {path}")
 
-        severity_dest = export_raster(
-            str(outputs.severity),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_SEVERITY, context),
-            feedback,
-        )
-        dnbr_dest = export_raster(
-            str(outputs.dnbr),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_DNBR, context),
-            feedback,
-        )
-        burnt_dest = export_raster(
-            str(outputs.burnt_mask),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_BURNT_MASK, context),
-            feedback,
-        )
-        feedback.setProgress(100)
+            severity_dest = export_raster(
+                str(outputs.severity),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_SEVERITY, context),
+                feedback,
+            )
+            dnbr_dest = export_raster(
+                str(outputs.dnbr),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_DNBR, context),
+                feedback,
+            )
+            burnt_dest = export_raster(
+                str(outputs.burnt_mask),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_BURNT_MASK, context),
+                feedback,
+            )
+            feedback.setProgress(100)
 
-        self._style_targets = [
-            (severity_dest, "severity"),
-            (dnbr_dest, "dnbr"),
-            (burnt_dest, "burnt_mask"),
-        ]
-        self._results = {
-            self.OUTPUT_SEVERITY: severity_dest,
-            self.OUTPUT_DNBR: dnbr_dest,
-            self.OUTPUT_BURNT_MASK: burnt_dest,
-            self.OUTPUT_DIR: str(output_dir),
-        }
-        return self._results
+            self._style_targets = [
+                (severity_dest, "severity"),
+                (dnbr_dest, "dnbr"),
+                (burnt_dest, "burnt_mask"),
+            ]
+            self._results = {
+                self.OUTPUT_SEVERITY: severity_dest,
+                self.OUTPUT_DNBR: dnbr_dest,
+                self.OUTPUT_BURNT_MASK: burnt_dest,
+                self.OUTPUT_DIR: str(output_dir) if folder else "",
+            }
+            return self._results
+        finally:
+            if temp_output_dir is not None:
+                shutil.rmtree(temp_output_dir, ignore_errors=True)
 
     def postProcessAlgorithm(self, context, feedback) -> dict[str, Any]:
         """Style each loaded output raster with its palette / colour ramp."""

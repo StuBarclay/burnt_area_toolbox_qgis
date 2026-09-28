@@ -20,9 +20,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from qgis.core import (
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsMapLayerProxyModel,
+    QgsProcessingAlgRunnerTask,
+    QgsProcessingContext,
     QgsProcessingFeedback,
+    QgsProject,
     QgsReferencedRectangle,
     QgsSettings,
 )
@@ -32,7 +36,7 @@ from qgis.gui import (
     QgsMapLayerComboBox,
     QgsProjectionSelectionWidget,
 )
-from qgis.PyQt.QtCore import QDate
+from qgis.PyQt.QtCore import QDate, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -45,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QProgressBar,
     QSpinBox,
     QVBoxLayout,
 )
@@ -70,20 +75,27 @@ _SETTINGS_PREFIX = "BurntAreaToolbox/dialog/"
 
 
 class _LogFeedback(QgsProcessingFeedback):
-    """Routes Processing feedback into the dialog's log pane."""
+    """Relays Processing feedback to the dialog as a thread-safe signal.
 
-    def __init__(self, sink) -> None:
-        super().__init__()
-        self._sink = sink
+    The algorithm runs on a background thread (via
+    :class:`QgsProcessingAlgRunnerTask`), so its feedback callbacks fire off
+    the GUI thread. Touching a widget from there is unsafe, so instead of
+    writing to the log pane directly this emits the :attr:`message` Qt signal.
+    Connected across threads it uses a queued connection, so the slot that
+    appends to the log runs on the main thread.
+    """
+
+    #: Emitted for every info / command / error line the algorithm reports.
+    message = pyqtSignal(str)
 
     def pushInfo(self, info: str) -> None:
-        self._sink(info)
+        self.message.emit(info)
 
     def reportError(self, error: str, fatalError: bool = False) -> None:
-        self._sink(f"ERROR: {error}")
+        self.message.emit(f"ERROR: {error}")
 
     def pushCommandInfo(self, info: str) -> None:
-        self._sink(info)
+        self.message.emit(info)
 
 
 class BurntAreaDialog(QDialog):
@@ -100,6 +112,13 @@ class BurntAreaDialog(QDialog):
         self.iface = iface
         self.setWindowTitle("Burnt Area Toolbox (dNBR)")
         self.setMinimumWidth(560)
+        # References to the in-flight run are kept so Qt does not garbage-collect
+        # the task, its context or its feedback while it executes on a worker
+        # thread. They are cleared again when the run finishes (see
+        # ``_on_task_finished``); ``None`` means "no run in progress".
+        self._task: QgsProcessingAlgRunnerTask | None = None
+        self._context: QgsProcessingContext | None = None
+        self._feedback: _LogFeedback | None = None
         self._build_ui()
 
     # -- construction -----------------------------------------------------
@@ -131,11 +150,25 @@ class BurntAreaDialog(QDialog):
         self.log.setMinimumHeight(130)
         layout.addWidget(self.log)
 
+        # Progress is only shown while a run is in flight. The algorithm reports
+        # progress through the feedback object, which drives this bar.
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
         self.buttons = QDialogButtonBox()
         # Fully-scoped Qt enum names (``ButtonRole.AcceptRole``): PyQt6, which
         # QGIS 4 ships, dropped the unscoped aliases for Qt's own enums; the
         # scoped form also works on the PyQt5 that QGIS 3.x ships.
         self.run_button = self.buttons.addButton("Run", QDialogButtonBox.ButtonRole.AcceptRole)
+        # ActionRole so clicking Cancel neither accepts nor rejects the dialog --
+        # it only asks the running task to stop.
+        self.cancel_button = self.buttons.addButton(
+            "Cancel", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._on_cancel)
         self.buttons.addButton(QDialogButtonBox.StandardButton.Close)
         self.buttons.accepted.connect(self._on_run)
         self.buttons.rejected.connect(self.close)
@@ -395,6 +428,10 @@ class BurntAreaDialog(QDialog):
 
     # -- run --------------------------------------------------------------
     def _on_run(self) -> None:
+        if self._task is not None:
+            # A run is already in flight; ignore the extra click.
+            return
+
         output_dir = self.output_widget.filePath().strip()
         if not output_dir:
             self._log("Please choose an output folder.")
@@ -410,24 +447,74 @@ class BurntAreaDialog(QDialog):
 
         self._save_settings()
 
-        try:
-            from qgis import processing
-        except ImportError:  # pragma: no cover - environment dependent
-            import processing
-
-        self.run_button.setEnabled(False)
-        self._log("Running…")
-        # Catch broadly on purpose: any failure should be surfaced in the log
-        # pane rather than raising into the QGIS UI.
-        try:
-            results = processing.run(algorithm_id, params, feedback=_LogFeedback(self._log))
-        except Exception as error:
-            self._log(f"Run failed: {error}")
-            self.run_button.setEnabled(True)
+        algorithm = QgsApplication.processingRegistry().algorithmById(algorithm_id)
+        if algorithm is None:  # pragma: no cover - registry always has our algs
+            self._log(f"Could not find the algorithm '{algorithm_id}'.")
             return
 
-        self._load_and_style(results)
-        self.run_button.setEnabled(True)
+        # Run on a worker thread via the QGIS task manager so the STAC download
+        # and warping do not freeze the QGIS window. The feedback object relays
+        # log lines (as a queued signal) and progress back to this dialog, and
+        # the Cancel button asks it to stop.
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+
+        feedback = _LogFeedback()
+        feedback.message.connect(self._log)
+        feedback.progressChanged.connect(self._on_progress)
+
+        task = QgsProcessingAlgRunnerTask(algorithm, params, context, feedback)
+        task.executed.connect(self._on_task_finished)
+
+        self._task = task
+        self._context = context
+        self._feedback = feedback
+
+        self._set_running(True)
+        self._log("Running…")
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_progress(self, progress: float) -> None:
+        """Reflect the algorithm's reported progress (0-100) in the bar."""
+        self.progress_bar.setValue(int(progress))
+
+    def _on_cancel(self) -> None:
+        """Ask the running task to stop at its next cancellation check."""
+        if self._feedback is not None:
+            self._log("Cancelling…")
+            self._feedback.cancel()
+            self.cancel_button.setEnabled(False)
+
+    def _on_task_finished(self, successful: bool, results: dict | None) -> None:
+        """Handle completion of the background run on the main thread."""
+        cancelled = self._feedback is not None and self._feedback.isCanceled()
+        # Release the run references first so a follow-up run can start even if
+        # styling below raises.
+        self._task = None
+        self._context = None
+        self._feedback = None
+        self._set_running(False)
+
+        if successful:
+            self._load_and_style(results or {})
+        elif cancelled:
+            self._log("Run cancelled.")
+        else:
+            self._log("Run failed. See the messages above for details.")
+
+    def _set_running(self, running: bool) -> None:
+        """Toggle the dialog between its idle and running states."""
+        self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
+        self.progress_bar.setVisible(running)
+        if running:
+            self.progress_bar.setValue(0)
+
+    def closeEvent(self, event) -> None:
+        """Cancel any in-flight run when the dialog is closed."""
+        if self._feedback is not None:
+            self._feedback.cancel()
+        super().closeEvent(event)
 
     def _raster_params(self, output_dir: str):
         pre_layer = self.pre_combo.currentLayer()

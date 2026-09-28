@@ -25,3 +25,5 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+burnt_area_toolbox_qgis.bundle

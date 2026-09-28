@@ -39,6 +39,10 @@ _EQUAL_AREA_CRS = "EPSG:6933"
 #: The output GeoJSON CRS (the format's default and only portable choice).
 _GEOJSON_CRS = "EPSG:4326"
 
+#: Vertices inserted along each polygon edge before the equal-area reprojection
+#: used for area measurement (mirrors ``transform_bounds``' densification).
+_AREA_DENSIFY_PTS = 21
+
 
 @dataclass(slots=True)
 class VectorFeature:
@@ -100,8 +104,15 @@ def _projected_area_km2(geometry: dict[str, Any], grid: RasterGrid) -> float:
 
     from ._rio.warp import transform_geom
 
+    # Densify each edge before the geographic -> equal-area reprojection so a
+    # long polygon edge that is straight in lat/long but curved on EPSG:6933 is
+    # sampled at intermediate points; measuring the reprojected endpoints alone
+    # would under/over-state the area of large regions.
     reprojected = transform_geom(
-        crs if crs is not None else _GEOJSON_CRS, _EQUAL_AREA_CRS, geometry
+        crs if crs is not None else _GEOJSON_CRS,
+        _EQUAL_AREA_CRS,
+        geometry,
+        densify_pts=_AREA_DENSIFY_PTS,
     )
     return _polygon_area(reprojected) / 1_000_000.0
 

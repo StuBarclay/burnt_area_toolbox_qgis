@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -9,6 +12,68 @@ from osgeo import gdal, gdal_array
 
 from .crs import CRS, CRSLike
 from .errors import RasterioError
+
+#: GDAL configuration applied while reading remote (``/vsicurl`` etc.) Cloud-
+#: Optimised GeoTIFFs. These make transfers resilient to transient network
+#: failures (GDAL's own bounded retry), bound how long a stalled request may
+#: hang, and speed up opens by not listing the remote directory. They are set
+#: only for the duration of a remote read and then restored, so QGIS's own GDAL
+#: configuration is never permanently changed.
+_REMOTE_GDAL_CONFIG: dict[str, str] = {
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "1",
+    "GDAL_HTTP_TIMEOUT": "60",
+    "GDAL_HTTP_CONNECTTIMEOUT": "30",
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "CPL_VSIL_CURL_USE_HEAD": "NO",
+    "VSI_CACHE": "TRUE",
+}
+
+#: How many times a remote warp is attempted before giving up. GDAL retries at
+#: the HTTP layer (``GDAL_HTTP_MAX_RETRY``); this outer loop additionally covers
+#: errors GDAL surfaces without retrying, so a single blip mid-download does not
+#: abort a whole multi-scene run.
+_MAX_REMOTE_ATTEMPTS = 3
+
+#: Base back-off (seconds) between remote warp attempts; grows linearly.
+_REMOTE_RETRY_BACKOFF_S = 2.0
+
+
+def _is_remote_source(source: str) -> bool:
+    """Return whether ``source`` is a network dataset worth retrying/tuning.
+
+    Recognises GDAL virtual network filesystems (``/vsicurl/``, ``/vsis3/``,
+    ``/vsigs/``, ``/vsiaz/``, ``/vsioss/``, ``/vsiswift/``) and bare
+    ``http(s)://`` URLs. Local paths return ``False`` so their reads stay fast
+    and any failure surfaces immediately instead of being retried.
+    """
+    lowered = source.lower()
+    if lowered.startswith(("http://", "https://")):
+        return True
+    return any(
+        token in lowered
+        for token in ("/vsicurl", "/vsis3", "/vsigs", "/vsiaz", "/vsioss", "/vsiswift")
+    )
+
+
+@contextmanager
+def _gdal_config(options: Mapping[str, str]) -> Iterator[None]:
+    """Temporarily set GDAL config options, restoring the prior values after.
+
+    Uses ``gdal.GetConfigOption`` / ``gdal.SetConfigOption`` directly (rather
+    than :func:`gdal.config_options`) so it behaves identically across the GDAL
+    versions QGIS ships. Each key's previous value is captured and restored,
+    including keys that were previously unset (restored to ``None``).
+    """
+    previous: dict[str, str | None] = {}
+    try:
+        for key, value in options.items():
+            previous[key] = gdal.GetConfigOption(key, None)
+            gdal.SetConfigOption(key, value)
+        yield
+    finally:
+        for key, prior in previous.items():
+            gdal.SetConfigOption(key, prior)
 
 
 def np_to_gdal_dtype(dtype: Any) -> int:
@@ -113,6 +178,33 @@ def warp_source_to_grid(
     if dst_nodata is not None:
         options["dstNodata"] = float(dst_nodata)
 
+    if not _is_remote_source(source):
+        # Local source: a failure is deterministic, so read once and surface it.
+        return _warp_once(source, options)
+
+    # Remote source: tune GDAL for /vsicurl and retry a bounded number of times
+    # so a transient network blip does not abort a whole multi-scene run.
+    with _gdal_config(_REMOTE_GDAL_CONFIG):
+        last_error: Exception | None = None
+        for attempt in range(1, _MAX_REMOTE_ATTEMPTS + 1):
+            try:
+                return _warp_once(source, options)
+            except (RasterioError, RuntimeError) as error:
+                last_error = error
+                if attempt < _MAX_REMOTE_ATTEMPTS:
+                    time.sleep(_REMOTE_RETRY_BACKOFF_S * attempt)
+    raise RasterioError(
+        f"gdal.Warp failed for remote source {source!r} after "
+        f"{_MAX_REMOTE_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
+
+
+def _warp_once(source: str, options: dict[str, Any]) -> np.ndarray[Any, np.dtype[Any]]:
+    """Run a single ``gdal.Warp`` into memory and return band 1 as an array.
+
+    Raises:
+        RasterioError: If the warp fails or returns an empty result.
+    """
     warped = gdal.Warp("", source, **options)
     if warped is None:
         raise RasterioError(f"gdal.Warp failed for source {source!r}.")

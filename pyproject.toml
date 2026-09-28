@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "burnt-area-toolbox-qgis"
-version = "0.1.0"
+version = "0.2.0"
 description = "QGIS plugin: Sentinel-2 dNBR burnt-area and burn-severity mapping"
 readme = "README.md"
 # The vendored compute core uses ``@dataclass(slots=True)`` and the

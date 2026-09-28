@@ -37,7 +37,9 @@ def test_write_run_outputs_names_rasters_and_orders_all_paths(
     )
     monkeypatch.setattr(export_mod, "write_summary_csv", lambda config, result, out: summary)
     monkeypatch.setattr(export_mod, "write_vectors", lambda config, result, out: vectors)
-    monkeypatch.setattr(export_mod, "write_manifest", lambda config, result, out: manifest)
+    monkeypatch.setattr(
+        export_mod, "write_manifest", lambda config, result, out, written=None: manifest
+    )
 
     outputs = _outputs.write_run_outputs(cast(Any, None), cast(Any, None), tmp_path)
 
@@ -63,9 +65,35 @@ def test_write_run_outputs_handles_no_vectors(monkeypatch: Any, tmp_path: Path) 
     )
     monkeypatch.setattr(export_mod, "write_summary_csv", lambda config, result, out: summary)
     monkeypatch.setattr(export_mod, "write_vectors", lambda config, result, out: [])
-    monkeypatch.setattr(export_mod, "write_manifest", lambda config, result, out: manifest)
+    monkeypatch.setattr(
+        export_mod, "write_manifest", lambda config, result, out, written=None: manifest
+    )
 
     outputs = _outputs.write_run_outputs(cast(Any, None), cast(Any, None), tmp_path)
 
     assert outputs.vectors == []
     assert outputs.all_paths == [*rasters, summary, manifest]
+
+
+def test_write_run_outputs_key_rasters_only(monkeypatch: Any, tmp_path: Path) -> None:
+    """With ``full_set=False`` only the three key rasters are written."""
+    keys = (tmp_path / "dnbr.tif", tmp_path / "severity.tif", tmp_path / "burnt.tif")
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - must not run
+        raise AssertionError("full-set writers must not be called in key-rasters mode")
+
+    monkeypatch.setattr(export_mod, "write_key_rasters", lambda config, result, out: keys)
+    monkeypatch.setattr(export_mod, "write_result_rasters", _boom)
+    monkeypatch.setattr(export_mod, "write_summary_csv", _boom)
+    monkeypatch.setattr(export_mod, "write_vectors", _boom)
+    monkeypatch.setattr(export_mod, "write_manifest", _boom)
+
+    outputs = _outputs.write_run_outputs(cast(Any, None), cast(Any, None), tmp_path, full_set=False)
+
+    assert (outputs.dnbr, outputs.severity, outputs.burnt_mask) == keys
+    assert outputs.baseline_nbr is None
+    assert outputs.postfire_nbr is None
+    assert outputs.summary_csv is None
+    assert outputs.manifest is None
+    assert outputs.vectors == []
+    assert outputs.all_paths == list(keys)

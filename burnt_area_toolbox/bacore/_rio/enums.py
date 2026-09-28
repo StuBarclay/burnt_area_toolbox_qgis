@@ -26,6 +26,11 @@ class Resampling(enum.Enum):
     lanczos = gdalconst.GRA_Lanczos
     average = gdalconst.GRA_Average
     mode = gdalconst.GRA_Mode
+    # ``GRA_Max``/``Min``/``Med`` were added in GDAL 2.2. On the rare older
+    # build that lacks them these members silently alias nearest-neighbour so
+    # importing the enum never fails; the core only uses nearest/bilinear, so
+    # this affects nothing in practice, but a caller that explicitly asked for
+    # ``max``/``min``/``med`` on such a build would get nearest instead.
     max = getattr(gdalconst, "GRA_Max", gdalconst.GRA_NearestNeighbour)
     min = getattr(gdalconst, "GRA_Min", gdalconst.GRA_NearestNeighbour)
     med = getattr(gdalconst, "GRA_Med", gdalconst.GRA_NearestNeighbour)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -249,6 +250,7 @@ class DnbrFromRastersAlgorithm(QgsProcessingAlgorithm):
         output_crs = crs_to_epsg_string(post_layer.crs()) or "EPSG:4326"
 
         folder = self.parameterAsString(parameters, self.OUTPUT_DIR, context)
+        temp_output_dir: Path | None = None
         if folder:
             output_dir = Path(folder)
         elif export_polygons:
@@ -256,79 +258,89 @@ class DnbrFromRastersAlgorithm(QgsProcessingAlgorithm):
                 "Set an output folder to keep the exported polygons, or untick that option."
             )
         else:
+            # No folder to keep: write into a scratch directory we delete once
+            # the requested rasters have been copied to their destinations.
             output_dir = Path(tempfile.mkdtemp(prefix="burntarea_"))
+            temp_output_dir = output_dir
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        config = config_for_rasters(
-            grid,
-            output_crs=output_crs,
-            area_name=area_name,
-            fire_date=fire_date or None,
-            threshold=threshold,
-            min_burnt_patch_pixels=min_patch,
-            fill_holes_pixels=fill_holes,
-            export_polygons=export_polygons,
-            vector_min_area_km2=vector_min_area,
-        )
-
-        feedback.setProgress(10)
-        if feedback.isCanceled():
-            return {}
-        feedback.pushInfo("Computing NBR, dNBR and burn severity…")
         try:
-            result = pipeline.run_from_rasters(
-                config,
+            config = config_for_rasters(
                 grid,
-                pre_source=pre_source,
-                post_source=post_source,
-                nir_band=nir_band,
-                swir_band=None if already_nbr else swir_band,
-                resampling=resampling,
+                output_crs=output_crs,
+                area_name=area_name,
+                fire_date=fire_date or None,
+                threshold=threshold,
+                min_burnt_patch_pixels=min_patch,
+                fill_holes_pixels=fill_holes,
+                export_polygons=export_polygons,
+                vector_min_area_km2=vector_min_area,
             )
-        except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
-            raise QgsProcessingException(str(error)) from error
-        feedback.setProgress(70)
-        if feedback.isCanceled():
-            return {}
 
-        feedback.pushInfo(
-            f"Burnt area: {result.burnt_area_km2:.3f} km² of {result.valid_area_km2:.3f} km² valid."
-        )
-        outputs = write_run_outputs(config, result, output_dir)
-        for path in outputs.all_paths:
-            feedback.pushInfo(f"  wrote {path}")
+            feedback.setProgress(10)
+            if feedback.isCanceled():
+                return {}
+            feedback.pushInfo("Computing NBR, dNBR and burn severity…")
+            try:
+                result = pipeline.run_from_rasters(
+                    config,
+                    grid,
+                    pre_source=pre_source,
+                    post_source=post_source,
+                    nir_band=nir_band,
+                    swir_band=None if already_nbr else swir_band,
+                    resampling=resampling,
+                )
+            except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
+                raise QgsProcessingException(str(error)) from error
+            feedback.setProgress(70)
+            if feedback.isCanceled():
+                return {}
 
-        severity_dest = export_raster(
-            str(outputs.severity),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_SEVERITY, context),
-            feedback,
-        )
-        dnbr_dest = export_raster(
-            str(outputs.dnbr),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_DNBR, context),
-            feedback,
-        )
-        burnt_dest = export_raster(
-            str(outputs.burnt_mask),
-            self.parameterAsOutputLayer(parameters, self.OUTPUT_BURNT_MASK, context),
-            feedback,
-        )
-        feedback.setProgress(100)
+            feedback.pushInfo(
+                f"Burnt area: {result.burnt_area_km2:.3f} km² of "
+                f"{result.valid_area_km2:.3f} km² valid."
+            )
+            # Only write the full result set when the user set a folder to keep;
+            # otherwise write just the three exportable rasters.
+            outputs = write_run_outputs(config, result, output_dir, full_set=bool(folder))
+            for path in outputs.all_paths:
+                feedback.pushInfo(f"  wrote {path}")
 
-        # Remember the destinations so postProcessAlgorithm can style each layer
-        # once QGIS has loaded it into the project.
-        self._style_targets = [
-            (severity_dest, "severity"),
-            (dnbr_dest, "dnbr"),
-            (burnt_dest, "burnt_mask"),
-        ]
-        self._results = {
-            self.OUTPUT_SEVERITY: severity_dest,
-            self.OUTPUT_DNBR: dnbr_dest,
-            self.OUTPUT_BURNT_MASK: burnt_dest,
-            self.OUTPUT_DIR: str(output_dir),
-        }
-        return self._results
+            severity_dest = export_raster(
+                str(outputs.severity),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_SEVERITY, context),
+                feedback,
+            )
+            dnbr_dest = export_raster(
+                str(outputs.dnbr),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_DNBR, context),
+                feedback,
+            )
+            burnt_dest = export_raster(
+                str(outputs.burnt_mask),
+                self.parameterAsOutputLayer(parameters, self.OUTPUT_BURNT_MASK, context),
+                feedback,
+            )
+            feedback.setProgress(100)
+
+            # Remember the destinations so postProcessAlgorithm can style each
+            # layer once QGIS has loaded it into the project.
+            self._style_targets = [
+                (severity_dest, "severity"),
+                (dnbr_dest, "dnbr"),
+                (burnt_dest, "burnt_mask"),
+            ]
+            self._results = {
+                self.OUTPUT_SEVERITY: severity_dest,
+                self.OUTPUT_DNBR: dnbr_dest,
+                self.OUTPUT_BURNT_MASK: burnt_dest,
+                self.OUTPUT_DIR: str(output_dir) if folder else "",
+            }
+            return self._results
+        finally:
+            if temp_output_dir is not None:
+                shutil.rmtree(temp_output_dir, ignore_errors=True)
 
     def postProcessAlgorithm(self, context, feedback) -> dict[str, Any]:
         """Style each loaded output raster with its palette / colour ramp."""

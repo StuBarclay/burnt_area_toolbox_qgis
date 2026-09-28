@@ -131,30 +131,76 @@ def transform_bounds(
     return min(txs), min(tys), max(txs), max(tys)
 
 
+def _is_position(value: Any) -> bool:
+    """Whether ``value`` is a single GeoJSON position ``[x, y, ...]``."""
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) >= 2
+        and isinstance(value[0], (int, float))
+        and isinstance(value[1], (int, float))
+    )
+
+
 def _transform_coords(coords: Any, ct: osr.CoordinateTransformation) -> Any:
     """Recursively transform a (possibly nested) GeoJSON coordinate list."""
-    if (
-        isinstance(coords, (list, tuple))
-        and len(coords) >= 2
-        and isinstance(coords[0], (int, float))
-        and isinstance(coords[1], (int, float))
-    ):
+    if _is_position(coords):
         px, py, _ = ct.TransformPoint(float(coords[0]), float(coords[1]))
         rest = list(coords[2:])
         return [px, py, *rest]
     return [_transform_coords(part, ct) for part in coords]
 
 
+def _densify_positions(positions: Sequence[Any], densify_pts: int) -> list[list[float]]:
+    """Insert ``densify_pts`` evenly-spaced vertices along each segment.
+
+    Straight-line interpolation is done in the *source* CRS before the
+    transform, so that a segment which is straight in the source but curved
+    in the destination is sampled at intermediate points rather than being
+    reprojected as two endpoints joined by a straight line.
+    """
+    out: list[list[float]] = []
+    count = len(positions)
+    for index in range(count):
+        start = positions[index]
+        out.append([float(v) for v in start])
+        if densify_pts <= 0 or index + 1 >= count:
+            continue
+        end = positions[index + 1]
+        x0, y0 = float(start[0]), float(start[1])
+        x1, y1 = float(end[0]), float(end[1])
+        for step in range(1, densify_pts + 1):
+            t = step / (densify_pts + 1)
+            out.append([x0 + (x1 - x0) * t, y0 + (y1 - y0) * t])
+    return out
+
+
+def _densify_coords(coords: Any, densify_pts: int) -> Any:
+    """Recursively densify a (possibly nested) GeoJSON coordinate list."""
+    if _is_position(coords):
+        return [float(v) for v in coords]
+    if isinstance(coords, (list, tuple)) and coords and _is_position(coords[0]):
+        return _densify_positions(coords, densify_pts)
+    return [_densify_coords(part, densify_pts) for part in coords]
+
+
 def transform_geom(
     src_crs: CRSLike,
     dst_crs: CRSLike,
     geom: dict[str, Any],
+    densify_pts: int = 0,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Reproject a single GeoJSON geometry mapping.
 
     Mirrors :func:`rasterio.warp.transform_geom` for a single geometry
     (the only form the core uses), including ``GeometryCollection``.
+
+    ``densify_pts`` (default ``0``) inserts that many evenly-spaced vertices
+    along every segment before reprojecting. The default of ``0`` leaves the
+    geometry's vertices untouched, matching rasterio's default so the two
+    stay comparable; the burnt-area area measurement passes a positive value
+    so long polygon edges stay accurate across a geographic -> equal-area
+    reprojection.
     """
     ct = _coordinate_transformation(src_crs, dst_crs)
     geom_type = geom.get("type")
@@ -162,12 +208,16 @@ def transform_geom(
         return {
             "type": "GeometryCollection",
             "geometries": [
-                transform_geom(src_crs, dst_crs, sub) for sub in geom.get("geometries", [])
+                transform_geom(src_crs, dst_crs, sub, densify_pts=densify_pts)
+                for sub in geom.get("geometries", [])
             ],
         }
+    coordinates = geom["coordinates"]
+    if densify_pts > 0:
+        coordinates = _densify_coords(coordinates, densify_pts)
     return {
         "type": geom_type,
-        "coordinates": _transform_coords(geom["coordinates"], ct),
+        "coordinates": _transform_coords(coordinates, ct),
     }
 
 
@@ -195,8 +245,6 @@ def reproject(
     if src_transform is None or dst_transform is None:
         raise RasterioError("reproject requires src_transform and dst_transform")
 
-    src_ds = mem_dataset_from_array(source, src_transform, src_crs, src_nodata)
-
     rows, cols = destination.shape
     left, top = dst_transform * (0.0, 0.0)
     right, bottom = dst_transform * (float(cols), float(rows))
@@ -221,12 +269,24 @@ def reproject(
     if dst_nodata is not None:
         warp_options["dstNodata"] = dst_nodata
 
-    warped = gdal.Warp("", src_ds, **warp_options)
-    if warped is None:
-        raise RasterioError("gdal.Warp failed during reproject")
+    # The source and warped datasets are in-memory (MEM driver); GDAL only
+    # frees them when the last Python reference is dropped, so both are
+    # released in a ``finally`` even if the warp or read raises. Otherwise a
+    # long multi-scene run would leak one MEM dataset per reproject.
+    src_ds = mem_dataset_from_array(source, src_transform, src_crs, src_nodata)
+    warped = None
+    try:
+        warped = gdal.Warp("", src_ds, **warp_options)
+        if warped is None:
+            raise RasterioError("gdal.Warp failed during reproject")
+        result = warped.GetRasterBand(1).ReadAsArray()
+    finally:
+        warped = None
+        src_ds = None
 
-    result = warped.GetRasterBand(1).ReadAsArray()
-    destination[:] = result.astype(destination.dtype)
+    if result is None:
+        raise RasterioError("gdal.Warp produced an empty result during reproject")
+    destination[:] = np.asarray(result).astype(destination.dtype)
     return destination, dst_transform
 
 

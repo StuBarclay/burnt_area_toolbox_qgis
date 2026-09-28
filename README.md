@@ -111,7 +111,19 @@ are all exercised without a QGIS runtime. The QGIS-side tests
 (`tests/test_qgis_glue.py`) and the GDAL-backed raster tests skip automatically
 via `pytest.importorskip` where `qgis` / `osgeo` are unavailable (the plain
 sandbox and the hosted CI runners), and run in full inside a QGIS Python
-environment.
+environment. A dedicated GDAL CI job additionally installs real `rasterio` +
+`affine` and runs `tests/test_rio_shim_equivalence.py`, which checks the
+vendored shim against genuine rasterio so the two stay interchangeable.
+
+### Building the installable ZIP
+
+```bash
+python scripts/build_plugin_zip.py
+```
+
+This writes `burnt_area_toolbox.zip` containing only the plugin package —
+byte-code caches, the test suite and tooling files are excluded — ready to
+attach to a GitHub Release or upload to plugins.qgis.org.
 
 ## Licence
 

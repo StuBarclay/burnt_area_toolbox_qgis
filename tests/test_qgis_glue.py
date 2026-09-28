@@ -210,3 +210,22 @@ def test_dialog_imports_inside_qgis() -> None:
     from burnt_area_toolbox.gui.dialog import BurntAreaDialog
 
     assert BurntAreaDialog is not None
+
+
+def test_dialog_runs_off_the_main_thread() -> None:
+    """The dialog drives runs through the task manager, not a blocking call.
+
+    The long STAC download must not freeze the QGIS window, so ``_on_run``
+    builds a :class:`QgsProcessingAlgRunnerTask` and the dialog exposes the
+    cancellation / completion wiring that goes with an asynchronous run.
+    """
+    from burnt_area_toolbox.gui.dialog import BurntAreaDialog, _LogFeedback
+    from qgis.core import QgsProcessingFeedback
+
+    for name in ("_on_run", "_on_cancel", "_on_task_finished", "_on_progress", "_set_running"):
+        assert callable(getattr(BurntAreaDialog, name)), name
+
+    # Feedback relays log lines as a Qt signal so worker-thread output reaches
+    # the GUI thread safely, and stays a QgsProcessingFeedback the runner accepts.
+    assert issubclass(_LogFeedback, QgsProcessingFeedback)
+    assert hasattr(_LogFeedback, "message")

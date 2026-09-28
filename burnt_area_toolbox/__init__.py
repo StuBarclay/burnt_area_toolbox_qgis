@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 
 #: Plugin version (kept in sync with ``metadata.txt``).
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 #: The compute core uses ``@dataclass(slots=True)`` and ``zip(..., strict=True)``,
 #: both introduced in Python 3.10. QGIS bundles this interpreter, so this maps

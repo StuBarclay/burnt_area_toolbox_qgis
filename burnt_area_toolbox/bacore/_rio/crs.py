@@ -173,7 +173,17 @@ class CRS:
         return not result
 
     def __hash__(self) -> int:
-        return hash(self.to_string())
+        # Equality is *semantic* (``osr.IsSame``): two spatial references can
+        # compare equal yet export to different WKT / ``to_string()`` values
+        # (e.g. one identifies to "EPSG:4326" while an equivalent WKT does
+        # not). Hashing on ``to_string()`` would then break the
+        # ``a == b => hash(a) == hash(b)`` invariant, corrupting ``set``/
+        # ``dict`` membership. There is no cheap canonical form guaranteed
+        # identical for all semantically-equal CRSs, and this shim only ever
+        # holds a handful of CRS objects, so we trade hash distribution for
+        # correctness and hash them all to one bucket; membership then falls
+        # back to :meth:`__eq__`.
+        return 0
 
     def __bool__(self) -> bool:
         return True
